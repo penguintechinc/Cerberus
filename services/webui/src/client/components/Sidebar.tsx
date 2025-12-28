@@ -17,6 +17,16 @@ const navigation: NavCategory[] = [
     ],
   },
   {
+    label: 'Security',
+    roles: ['admin', 'maintainer'],
+    items: [
+      { label: 'Firewall', path: '/firewall', icon: '🛡️', roles: ['admin', 'maintainer'] },
+      { label: 'IPS/IDS', path: '/ips', icon: '🚨', roles: ['admin', 'maintainer'] },
+      { label: 'VPN', path: '/vpn', icon: '🔐', roles: ['admin', 'maintainer'] },
+      { label: 'Content Filter', path: '/filter', icon: '🌐', roles: ['admin', 'maintainer'] },
+    ],
+  },
+  {
     label: 'Management',
     roles: ['admin', 'maintainer'],
     items: [
@@ -59,7 +69,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       {/* Header */}
       <div className="flex items-center justify-between h-16 px-4 border-b border-dark-700">
         {!collapsed && (
-          <span className="text-xl font-bold text-gold-gradient">WebUI</span>
+          <span className="text-xl font-bold text-gold-gradient">Cerberus</span>
         )}
         <button
           onClick={onToggle}

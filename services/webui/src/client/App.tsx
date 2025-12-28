@@ -9,6 +9,10 @@ import Users from './pages/Users';
 import UserDetail from './pages/UserDetail';
 import Profile from './pages/Profile';
 import Settings from './pages/Settings';
+import Firewall from './pages/Firewall';
+import IPS from './pages/IPS';
+import VPN from './pages/VPN';
+import ContentFilter from './pages/ContentFilter';
 
 function App() {
   const { isAuthenticated, isLoading } = useAuth();
@@ -40,6 +44,40 @@ function App() {
         {/* Dashboard - all authenticated users */}
         <Route path="/" element={<Dashboard />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />
+
+        {/* NGFW Pages - Maintainer and Admin */}
+        <Route
+          path="/firewall"
+          element={
+            <RoleGuard allowedRoles={['admin', 'maintainer']}>
+              <Firewall />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="/ips"
+          element={
+            <RoleGuard allowedRoles={['admin', 'maintainer']}>
+              <IPS />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="/vpn"
+          element={
+            <RoleGuard allowedRoles={['admin', 'maintainer']}>
+              <VPN />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="/filter"
+          element={
+            <RoleGuard allowedRoles={['admin', 'maintainer']}>
+              <ContentFilter />
+            </RoleGuard>
+          }
+        />
 
         {/* Profile - all authenticated users */}
         <Route path="/profile" element={<Profile />} />

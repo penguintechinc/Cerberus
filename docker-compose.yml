@@ -1,52 +1,114 @@
+# Cerberus NGFW/UTM - Unified Docker Compose
+# Wraps MarchProxy with IPS, Content Filtering, VPN, and NSM capabilities
+# Version: v0.1.0
+# Performance Target: 40Gbps+ line rate
+
 version: '3.8'
 
 services:
-  # PostgreSQL Database
+  # ============================================================================
+  # Infrastructure Services
+  # ============================================================================
+
+  # PostgreSQL Database (shared)
   postgres:
     image: postgres:16-alpine
-    container_name: project-template-postgres
+    container_name: cerberus-postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-app_db}
-      POSTGRES_USER: ${POSTGRES_USER:-app_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-cerberus}
+      POSTGRES_USER: ${POSTGRES_USER:-cerberus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cerberus123}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app_user} -d ${POSTGRES_DB:-app_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cerberus} -d ${POSTGRES_DB:-cerberus}"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
     networks:
-      - app-network
+      - cerberus-network
 
-  # Redis Cache
+  # Redis Cache (shared)
   redis:
     image: redis:7-alpine
-    container_name: project-template-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:-password} --appendonly yes
+    container_name: cerberus-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-cerberus123} --appendonly yes
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-password}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-cerberus123}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
     networks:
-      - app-network
+      - cerberus-network
 
-  # Flask Backend (Standard APIs, Auth, Users)
-  flask-backend:
+  # OpenSearch for Centralized Logging
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: cerberus-opensearch
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD:-Cerberus@123}
+      - plugins.security.disabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+      - "${OPENSEARCH_PERF_PORT:-9600}:9600"
+    networks:
+      - cerberus-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -k https://localhost:9200 -u admin:${OPENSEARCH_PASSWORD:-Cerberus@123} | grep -q cluster_name"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # OpenSearch Dashboards (optional - can use Cerberus WebUI Log Explorer)
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.0
+    container_name: cerberus-opensearch-dashboards
+    profiles:
+      - dashboards
+    environment:
+      OPENSEARCH_HOSTS: '["https://opensearch:9200"]'
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-Cerberus@123}
+    ports:
+      - "${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
+    networks:
+      - cerberus-network
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  # ============================================================================
+  # Cerberus Core Services
+  # ============================================================================
+
+  # Cerberus API (NGFW Control Plane - Flask + PyDAL)
+  cerberus-api:
     build:
       context: ./services/flask-backend
       dockerfile: Dockerfile
-    container_name: project-template-flask
+    container_name: cerberus-api
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
@@ -54,18 +116,32 @@ services:
       - DB_TYPE=${DB_TYPE:-postgres}
       - DB_HOST=postgres
       - DB_PORT=5432
-      - DB_NAME=${POSTGRES_DB:-app_db}
-      - DB_USER=${POSTGRES_USER:-app_user}
-      - DB_PASS=${POSTGRES_PASSWORD:-password}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
-      - DEFAULT_ADMIN_EMAIL=${DEFAULT_ADMIN_EMAIL:-admin@example.com}
+      - DB_NAME=${POSTGRES_DB:-cerberus}
+      - DB_USER=${POSTGRES_USER:-cerberus}
+      - DB_PASS=${POSTGRES_PASSWORD:-cerberus123}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-cerberus123}@redis:6379/0
+      - DEFAULT_ADMIN_EMAIL=${DEFAULT_ADMIN_EMAIL:-admin@cerberus.local}
       - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-admin123}
+      # OpenSearch
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Cerberus@123}
+      # MarchProxy Integration
+      - MARCHPROXY_API_URL=http://marchproxy-api-server:8000
+      - MARCHPROXY_XDS_HOST=marchproxy-api-server
+      - MARCHPROXY_XDS_PORT=18000
+      # Metrics
+      - PROMETHEUS_URL=http://prometheus:9090
     ports:
-      - "${FLASK_PORT:-5000}:5000"
+      - "${CERBERUS_API_PORT:-5000}:5000"
+      - "9105:9105"  # Prometheus metrics
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      opensearch:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/healthz"]
@@ -74,33 +150,39 @@ services:
       retries: 3
     restart: unless-stopped
     networks:
-      - app-network
+      - cerberus-network
 
-  # Go Backend (High-Performance, XDP/AF_XDP, NUMA)
-  go-backend:
+  # Cerberus XDP (Packet Steering, XDP/AF_XDP, NUMA)
+  cerberus-xdp:
     build:
       context: ./services/go-backend
       dockerfile: Dockerfile
-    container_name: project-template-go
+    container_name: cerberus-xdp
     privileged: true
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
       - IPC_LOCK
+      - BPF
+      - NET_RAW
     environment:
       - GO_ENV=${GO_ENV:-production}
       - HOST=0.0.0.0
       - PORT=8080
       - NUMA_ENABLED=${NUMA_ENABLED:-false}
-      - XDP_ENABLED=${XDP_ENABLED:-false}
+      - XDP_ENABLED=${XDP_ENABLED:-true}
       - XDP_MODE=${XDP_MODE:-skb}
       - XDP_INTERFACE=${XDP_INTERFACE:-eth0}
       - MEMORY_POOL_SLOTS=${MEMORY_POOL_SLOTS:-1024}
       - MEMORY_POOL_SLOT_SIZE=${MEMORY_POOL_SLOT_SIZE:-2048}
+      # API connection
+      - CERBERUS_API_URL=http://cerberus-api:5000
     ports:
-      - "${GO_PORT:-8080}:8080"
+      - "${CERBERUS_XDP_PORT:-8080}:8080"
+      - "9106:9106"  # Prometheus metrics
     volumes:
       - /sys/fs/bpf:/sys/fs/bpf
+      - /sys/kernel/debug:/sys/kernel/debug:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
       interval: 30s
@@ -108,23 +190,25 @@ services:
       retries: 3
     restart: unless-stopped
     networks:
-      - app-network
+      - cerberus-network
 
-  # WebUI (Node.js + React Frontend Shell)
-  webui:
+  # Cerberus WebUI (React NGFW Dashboard)
+  cerberus-webui:
     build:
       context: ./services/webui
       dockerfile: Dockerfile
-    container_name: project-template-webui
+    container_name: cerberus-webui
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
-      - FLASK_API_URL=http://flask-backend:5000
-      - GO_API_URL=http://go-backend:8080
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - CERBERUS_XDP_URL=http://cerberus-xdp:8080
+      - GRAFANA_URL=http://grafana:3000
+      - OPENSEARCH_DASHBOARDS_URL=http://opensearch-dashboards:5601
     ports:
       - "${WEBUI_PORT:-3000}:3000"
     depends_on:
-      - flask-backend
+      - cerberus-api
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/healthz"]
       interval: 30s
@@ -132,12 +216,357 @@ services:
       retries: 3
     restart: unless-stopped
     networks:
-      - app-network
+      - cerberus-network
 
-  # Prometheus Monitoring
+  # ============================================================================
+  # MarchProxy Services (Reused from submodule)
+  # ============================================================================
+
+  # MarchProxy API Server (xDS Control Plane)
+  marchproxy-api-server:
+    build:
+      context: ./marchproxy/api-server
+      dockerfile: Dockerfile
+    container_name: cerberus-marchproxy-api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-cerberus}:${POSTGRES_PASSWORD:-cerberus123}@postgres:5432/${POSTGRES_DB:-cerberus}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-cerberus123}@redis:6379/1
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - XDS_GRPC_PORT=18000
+      - XDS_GRPC_BIND=0.0.0.0:18000
+      - LICENSE_KEY=${LICENSE_KEY:-}
+      - LICENSE_SERVER_URL=${LICENSE_SERVER_URL:-https://license.penguintech.io}
+      - CORS_ORIGINS=http://cerberus-webui:3000,http://localhost:3000
+      - JAEGER_ENABLED=${JAEGER_ENABLED:-true}
+      - JAEGER_HOST=jaeger
+      - JAEGER_PORT=6831
+    ports:
+      - "${MARCHPROXY_API_PORT:-8000}:8000"
+      - "${MARCHPROXY_XDS_PORT:-18000}:18000"
+    networks:
+      - cerberus-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # MarchProxy NLB (L3/L4 Network Load Balancer)
+  marchproxy-nlb:
+    build:
+      context: ./marchproxy/proxy-nlb
+      dockerfile: Dockerfile
+    container_name: cerberus-marchproxy-nlb
+    environment:
+      - API_SERVER_URL=http://marchproxy-api-server:8000
+      - XDS_SERVER=marchproxy-api-server:18000
+      - CLUSTER_API_KEY=${CLUSTER_API_KEY:-default-api-key}
+      - PROXY_NAME=${PROXY_NLB_NAME:-cerberus-nlb-1}
+      - LISTEN_PORT=${NLB_PORT:-7000}
+      - ADMIN_PORT=7001
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - ALB_GRPC=marchproxy-alb:50051
+      - ENABLE_EBPF=${ENABLE_EBPF:-true}
+      - ENABLE_XDP=${ENABLE_XDP:-false}
+      - ENABLE_AF_XDP=${ENABLE_AF_XDP:-false}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-10000}
+      - JAEGER_ENABLED=${JAEGER_ENABLED:-true}
+      - JAEGER_HOST=jaeger
+      - JAEGER_PORT=6831
+    ports:
+      - "${NLB_PORT:-7000}:${NLB_PORT:-7000}"
+      - "7001:7001"
+    networks:
+      - cerberus-network
+    cap_add:
+      - NET_ADMIN
+      - SYS_RESOURCE
+    depends_on:
+      - marchproxy-api-server
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7001/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # MarchProxy ALB (L7 Application Load Balancer - Envoy)
+  marchproxy-alb:
+    build:
+      context: ./marchproxy/proxy-l7
+      dockerfile: Dockerfile
+    container_name: cerberus-marchproxy-alb
+    environment:
+      - XDS_SERVER=marchproxy-api-server:18000
+      - CLUSTER_API_KEY=${CLUSTER_API_KEY:-default-api-key}
+      - ENVOY_LOG_LEVEL=${ENVOY_LOG_LEVEL:-info}
+      - NUM_WORKERS=${NUM_WORKERS:-4}
+      - GRPC_PORT=50051
+      - GRPC_BIND=0.0.0.0:50051
+      - MODULE_TYPE=alb
+      - MODULE_NAME=${ALB_NAME:-cerberus-alb-1}
+      - RATE_LIMIT_ENABLED=${ALB_RATE_LIMIT:-true}
+      - JAEGER_ENABLED=${JAEGER_ENABLED:-true}
+      - JAEGER_HOST=jaeger
+      - JAEGER_PORT=6831
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8080"
+      - "9901:9901"
+      - "50051:50051"
+    networks:
+      - cerberus-network
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - marchproxy-api-server
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9901/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ============================================================================
+  # NGFW Services (IPS, Filter, VPN)
+  # ============================================================================
+
+  # Suricata IPS (Inline Real-Time)
+  cerberus-ips:
+    build:
+      context: ./services/cerberus-ips
+      dockerfile: Dockerfile
+    container_name: cerberus-ips
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_NICE
+    environment:
+      - SURICATA_MODE=ips
+      - SURICATA_INTERFACE=${SURICATA_INTERFACE:-eth0}
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Cerberus@123}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "9100:9100"  # Prometheus metrics
+    volumes:
+      - suricata_rules:/var/lib/suricata/rules
+      - suricata_logs:/var/log/suricata
+    networks:
+      - cerberus-network
+    cpu_shares: 4096
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "suricatasc", "-c", "iface-list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Content Filter (Go)
+  cerberus-filter:
+    build:
+      context: ./services/cerberus-filter
+      dockerfile: Dockerfile
+    container_name: cerberus-filter
+    environment:
+      - FILTER_MODE=proxy
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-cerberus123}@redis:6379/2
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "${FILTER_PORT:-8888}:8888"
+      - "9101:9101"  # Prometheus metrics
+    networks:
+      - cerberus-network
+    depends_on:
+      - cerberus-api
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8888/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # SSL Inspector (Go)
+  cerberus-ssl-inspector:
+    build:
+      context: ./services/cerberus-ssl-inspector
+      dockerfile: Dockerfile
+    container_name: cerberus-ssl-inspector
+    environment:
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - FILTER_URL=http://cerberus-filter:8888
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "${SSL_INSPECTOR_PORT:-8889}:8889"
+    volumes:
+      - ssl_certs:/etc/cerberus/ssl
+    networks:
+      - cerberus-network
+    depends_on:
+      - cerberus-api
+      - cerberus-filter
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8889/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # VPN Services (Separate Containers)
+  # ============================================================================
+
+  # WireGuard VPN
+  cerberus-vpn-wireguard:
+    build:
+      context: ./services/cerberus-vpn-wireguard
+      dockerfile: Dockerfile
+    container_name: cerberus-vpn-wireguard
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - WG_INTERFACE=wg0
+      - WG_PORT=${WG_PORT:-51820}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "${WG_PORT:-51820}:51820/udp"
+      - "9102:9102"  # Prometheus metrics
+    volumes:
+      - wireguard_config:/etc/wireguard
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      - cerberus-network
+    depends_on:
+      - cerberus-api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wg", "show", "wg0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # IPSec VPN (StrongSwan)
+  cerberus-vpn-ipsec:
+    build:
+      context: ./services/cerberus-vpn-ipsec
+      dockerfile: Dockerfile
+    container_name: cerberus-vpn-ipsec
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "500:500/udp"
+      - "4500:4500/udp"
+      - "9103:9103"  # Prometheus metrics
+    volumes:
+      - ipsec_config:/etc/ipsec.d
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      - cerberus-network
+    depends_on:
+      - cerberus-api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ipsec", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # OpenVPN Server
+  cerberus-vpn-openvpn:
+    build:
+      context: ./services/cerberus-vpn-openvpn
+      dockerfile: Dockerfile
+    container_name: cerberus-vpn-openvpn
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - CERBERUS_API_URL=http://cerberus-api:5000
+      - OVPN_PORT=${OVPN_PORT:-1194}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "${OVPN_PORT:-1194}:1194/udp"
+      - "9104:9104"  # Prometheus metrics
+    volumes:
+      - openvpn_config:/etc/openvpn
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      - cerberus-network
+    depends_on:
+      - cerberus-api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "openvpn"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Observability Stack
+  # ============================================================================
+
+  # Jaeger for Distributed Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: cerberus-jaeger
+    environment:
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+      - MEMORY_MAX_TRACES=10000
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    networks:
+      - cerberus-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus for Metrics Collection
   prometheus:
     image: prom/prometheus:latest
-    container_name: project-template-prometheus
+    container_name: cerberus-prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -151,17 +580,19 @@ services:
       - ./infrastructure/monitoring/prometheus:/etc/prometheus
       - prometheus_data:/prometheus
     networks:
-      - app-network
+      - cerberus-network
     restart: unless-stopped
 
-  # Grafana Dashboard
+  # Grafana for Visualization
   grafana:
     image: grafana/grafana:latest
-    container_name: project-template-grafana
+    container_name: cerberus-grafana
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3001}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
     ports:
       - "${GRAFANA_PORT:-3001}:3000"
     volumes:
@@ -171,35 +602,287 @@ services:
     depends_on:
       - prometheus
     networks:
-      - app-network
+      - cerberus-network
     restart: unless-stopped
 
-  # Nginx Reverse Proxy (optional - for production)
+  # Fluent Bit for Log Shipping
+  fluent-bit:
+    image: fluent/fluent-bit:latest
+    container_name: cerberus-fluent-bit
+    volumes:
+      - ./infrastructure/fluentbit:/fluent-bit/etc
+      - /var/log:/var/log:ro
+      - suricata_logs:/var/log/suricata:ro
+    networks:
+      - cerberus-network
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  # ============================================================================
+  # Network Security Monitoring (Optional - profile: nsm)
+  # ============================================================================
+
+  # MinIO S3-Compatible Storage for PCAPs
+  minio:
+    image: minio/minio:latest
+    container_name: cerberus-minio
+    profiles:
+      - nsm
+      - full
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-cerberus}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-cerberus123}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - cerberus-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Arkime (Real-Time PCAP Capture to S3)
+  cerberus-arkime:
+    build:
+      context: ./services/cerberus-arkime
+      dockerfile: Dockerfile
+    container_name: cerberus-arkime
+    profiles:
+      - nsm
+      - full
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_NICE
+    environment:
+      - ARKIME_INTERFACE=${ARKIME_INTERFACE:-eth0}
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Cerberus@123}
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=arkime-pcaps
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-cerberus}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-cerberus123}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "${ARKIME_PORT:-8005}:8005"
+    volumes:
+      - arkime_config:/data/arkime/etc
+    networks:
+      - cerberus-network
+    cpu_shares: 2048
+    depends_on:
+      - opensearch
+      - minio
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Zeek (Batch S3 PCAP Analysis - Low Priority)
+  cerberus-zeek:
+    build:
+      context: ./services/cerberus-zeek
+      dockerfile: Dockerfile
+    container_name: cerberus-zeek
+    profiles:
+      - nsm
+      - full
+    environment:
+      - ZEEK_MODE=batch
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=arkime-pcaps
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-cerberus}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-cerberus123}
+      - S3_MOUNT_PATH=/mnt/pcaps
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Cerberus@123}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - zeek_logs:/var/log/zeek
+      - type: volume
+        source: pcap_s3_mount
+        target: /mnt/pcaps
+    networks:
+      - cerberus-network
+    cpu_shares: 512
+    depends_on:
+      - opensearch
+      - minio
+    restart: unless-stopped
+
+  # Suricata IDS (Batch S3 Analysis - Low Priority)
+  cerberus-ids:
+    build:
+      context: ./services/cerberus-ids
+      dockerfile: Dockerfile
+    container_name: cerberus-ids
+    profiles:
+      - nsm
+      - full
+    environment:
+      - SURICATA_MODE=ids
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=arkime-pcaps
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-cerberus}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-cerberus123}
+      - S3_MOUNT_PATH=/mnt/pcaps
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Cerberus@123}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - suricata_ids_logs:/var/log/suricata
+      - type: volume
+        source: pcap_s3_mount
+        target: /mnt/pcaps
+    networks:
+      - cerberus-network
+    cpu_shares: 512
+    depends_on:
+      - opensearch
+      - minio
+    restart: unless-stopped
+
+  # ============================================================================
+  # MarchProxy Optional Modules (profiles)
+  # ============================================================================
+
+  # Database Load Balancer
+  marchproxy-dblb:
+    build:
+      context: ./marchproxy/proxy-dblb
+      dockerfile: Dockerfile
+    container_name: cerberus-marchproxy-dblb
+    profiles:
+      - full
+      - dblb
+    environment:
+      - API_SERVER_URL=http://marchproxy-api-server:8000
+      - CLUSTER_API_KEY=${CLUSTER_API_KEY:-default-api-key}
+      - GRPC_PORT=50052
+      - MODULE_TYPE=dblb
+      - MODULE_NAME=${DBLB_NAME:-cerberus-dblb-1}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "3306:3306"
+      - "5433:5432"
+      - "27017:27017"
+      - "50052:50052"
+    networks:
+      - cerberus-network
+    depends_on:
+      - marchproxy-api-server
+    restart: unless-stopped
+
+  # AI/LLM Load Balancer
+  marchproxy-ailb:
+    build:
+      context: ./marchproxy/proxy-ailb
+      dockerfile: Dockerfile
+    container_name: cerberus-marchproxy-ailb
+    profiles:
+      - full
+      - ailb
+    environment:
+      - API_SERVER_URL=http://marchproxy-api-server:8000
+      - CLUSTER_API_KEY=${CLUSTER_API_KEY:-default-api-key}
+      - GRPC_PORT=50053
+      - MODULE_TYPE=ailb
+      - MODULE_NAME=${AILB_NAME:-cerberus-ailb-1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-cerberus123}@redis:6379/3
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "7003:7003"
+      - "50053:50053"
+    networks:
+      - cerberus-network
+    depends_on:
+      - marchproxy-api-server
+      - redis
+    restart: unless-stopped
+
+  # RTMP Video Transcoding
+  marchproxy-rtmp:
+    build:
+      context: ./marchproxy/proxy-rtmp
+      dockerfile: Dockerfile
+      target: cpu
+    container_name: cerberus-marchproxy-rtmp
+    profiles:
+      - full
+      - rtmp
+    environment:
+      - API_SERVER_URL=http://marchproxy-api-server:8000
+      - CLUSTER_API_KEY=${CLUSTER_API_KEY:-default-api-key}
+      - GRPC_PORT=50054
+      - MODULE_TYPE=rtmp
+      - MODULE_NAME=${RTMP_NAME:-cerberus-rtmp-1}
+      - RTMP_PORT=1935
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-4}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "1935:1935"
+      - "8081:8081"
+      - "50054:50054"
+    volumes:
+      - rtmp_streams:/streams
+    networks:
+      - cerberus-network
+    depends_on:
+      - marchproxy-api-server
+    restart: unless-stopped
+
+  # ============================================================================
+  # Production Services (profile: production)
+  # ============================================================================
+
+  # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
-    container_name: project-template-nginx
+    container_name: cerberus-nginx
+    profiles:
+      - production
     ports:
-      - "${NGINX_HTTP_PORT:-80}:80"
-      - "${NGINX_HTTPS_PORT:-443}:443"
+      - "${NGINX_HTTP_PORT:-8080}:80"
+      - "${NGINX_HTTPS_PORT:-8443}:443"
     volumes:
       - ./infrastructure/docker/nginx/nginx.conf:/etc/nginx/nginx.conf
       - ./infrastructure/docker/nginx/conf.d:/etc/nginx/conf.d
       - ./infrastructure/docker/nginx/ssl:/etc/nginx/ssl
       - nginx_logs:/var/log/nginx
     depends_on:
-      - flask-backend
-      - go-backend
-      - webui
+      - cerberus-api
+      - cerberus-webui
     networks:
-      - app-network
+      - cerberus-network
     restart: unless-stopped
-    profiles:
-      - production
 
+# ============================================================================
+# Volumes
+# ============================================================================
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  opensearch_data:
     driver: local
   prometheus_data:
     driver: local
@@ -207,7 +890,37 @@ volumes:
     driver: local
   nginx_logs:
     driver: local
+  suricata_rules:
+    driver: local
+  suricata_logs:
+    driver: local
+  suricata_ids_logs:
+    driver: local
+  ssl_certs:
+    driver: local
+  wireguard_config:
+    driver: local
+  ipsec_config:
+    driver: local
+  openvpn_config:
+    driver: local
+  minio_data:
+    driver: local
+  arkime_config:
+    driver: local
+  zeek_logs:
+    driver: local
+  rtmp_streams:
+    driver: local
+  pcap_s3_mount:
+    driver: local
 
+# ============================================================================
+# Networks
+# ============================================================================
 networks:
-  app-network:
+  cerberus-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16

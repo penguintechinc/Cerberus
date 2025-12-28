@@ -25,6 +25,9 @@ python-decouple==3.8
 # Monitoring
 prometheus-client==0.21.1
 
+# Logging & Search
+opensearch-py==2.6.0
+
 # Development
 pytest==8.3.4
 pytest-cov==6.0.0

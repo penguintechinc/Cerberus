@@ -29,6 +29,14 @@ class Config:
     DB_PASS = os.getenv("DB_PASS", "app_pass")
     DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
 
+    # OpenSearch - Logs and Analytics
+    OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
+    OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
+    OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
+    OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "admin")
+    OPENSEARCH_USE_SSL = os.getenv("OPENSEARCH_USE_SSL", "true").lower() == "true"
+    OPENSEARCH_VERIFY_CERTS = os.getenv("OPENSEARCH_VERIFY_CERTS", "false").lower() == "true"
+
     # CORS
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
