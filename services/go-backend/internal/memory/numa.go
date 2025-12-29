@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -221,15 +222,30 @@ func parseNodeMemory(memInfo string) int64 {
 	return 0
 }
 
+// BindToNUMANode binds the current thread to a specific NUMA node.
+// This is a convenience function that creates a temporary allocator.
+func BindToNUMANode(nodeID int) error {
+	allocator, err := NewNUMAAllocator(nodeID, false)
+	if err != nil {
+		return err
+	}
+	return allocator.BindToNode()
+}
+
 // getCurrentNUMANode determines which NUMA node the current thread is on.
 func getCurrentNUMANode(info NUMAInfo) int {
-	// Get current CPU
-	cpu := unix.SchedGetcpu()
+	// Get current CPU using getcpu syscall
+	var cpu, node uint32
+	// SYS_GETCPU syscall number for x86_64 is 309
+	_, _, err := syscall.Syscall(309, uintptr(unsafe.Pointer(&cpu)), uintptr(unsafe.Pointer(&node)), 0)
+	if err != 0 {
+		return 0
+	}
 
 	// Find which node this CPU belongs to
 	for nodeID, cpus := range info.CPUsPerNode {
 		for _, c := range cpus {
-			if c == cpu {
+			if c == int(cpu) {
 				return nodeID
 			}
 		}

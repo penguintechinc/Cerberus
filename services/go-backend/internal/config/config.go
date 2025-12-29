@@ -10,9 +10,11 @@ import (
 // Config holds all configuration for the Go backend.
 type Config struct {
 	// Server settings
-	ServerHost string
-	ServerPort int
-	GRPCPort   int
+	Host        string
+	Port        int
+	GRPCPort    int
+	Environment string
+	Version     string
 
 	// XDP settings
 	XDPEnabled   bool
@@ -20,14 +22,14 @@ type Config struct {
 	XDPInterface string
 
 	// NUMA settings
-	NUMAEnabled   bool
-	NUMANodeID    int
+	NUMAEnabled      bool
+	NUMANodeID       int
 	HugepagesEnabled bool
 
 	// Memory pool settings
-	MemoryPoolSize    int
-	MemorySlotSize    int
-	MemoryPreallocate bool
+	MemoryPoolSlots    int
+	MemoryPoolSlotSize int
+	MemoryPreallocate  bool
 
 	// Metrics
 	MetricsEnabled bool
@@ -43,9 +45,11 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		// Server
-		ServerHost: getEnv("SERVER_HOST", "0.0.0.0"),
-		ServerPort: getEnvInt("SERVER_PORT", 8080),
-		GRPCPort:   getEnvInt("GRPC_PORT", 50051),
+		Host:        getEnv("HOST", "0.0.0.0"),
+		Port:        getEnvInt("PORT", 8080),
+		GRPCPort:    getEnvInt("GRPC_PORT", 50051),
+		Environment: getEnv("GO_ENV", "development"),
+		Version:     getEnv("VERSION", "1.0.0"),
 
 		// XDP
 		XDPEnabled:   getEnvBool("XDP_ENABLED", false),
@@ -58,9 +62,9 @@ func Load() *Config {
 		HugepagesEnabled: getEnvBool("HUGEPAGES_ENABLED", false),
 
 		// Memory pool
-		MemoryPoolSize:    getEnvInt("MEMORY_POOL_SIZE", 4096),
-		MemorySlotSize:    getEnvInt("MEMORY_SLOT_SIZE", 2048),
-		MemoryPreallocate: getEnvBool("MEMORY_PREALLOCATE", true),
+		MemoryPoolSlots:    getEnvInt("MEMORY_POOL_SLOTS", 1024),
+		MemoryPoolSlotSize: getEnvInt("MEMORY_POOL_SLOT_SIZE", 2048),
+		MemoryPreallocate:  getEnvBool("MEMORY_PREALLOCATE", true),
 
 		// Metrics
 		MetricsEnabled: getEnvBool("METRICS_ENABLED", true),

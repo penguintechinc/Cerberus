@@ -48,7 +48,14 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	var memPool *memory.MemoryPool
 	if cfg.MemoryPoolSlots > 0 {
 		var err error
-		memPool, err = memory.NewMemoryPool(cfg.MemoryPoolSlots, cfg.MemoryPoolSlotSize)
+		poolConfig := memory.PoolConfig{
+			NumSlots:     cfg.MemoryPoolSlots,
+			SlotSize:     cfg.MemoryPoolSlotSize,
+			NUMANodeID:   cfg.NUMANodeID,
+			UseHugepages: cfg.HugepagesEnabled,
+			Preallocate:  cfg.MemoryPreallocate,
+		}
+		memPool, err = memory.NewMemoryPool(poolConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create memory pool: %w", err)
 		}
